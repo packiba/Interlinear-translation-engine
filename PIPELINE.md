@@ -46,7 +46,7 @@ python bl_sentence_aligner.py book_ru_aligned.json book_bg_aligned.json \
 
 ```bash
 python create_blb.py book_aligned.json book_ru.json pdf/book_ru.pdf \
-  -o book_ru_bg.blb
+  --tgt-json book_bg.json -o book_ru_bg.blb
 ```
 
 Создаёт финальный BLB файл с обложкой и метаинформацией.

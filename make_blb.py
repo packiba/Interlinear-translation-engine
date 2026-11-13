@@ -80,7 +80,7 @@ def main():
         
         # Step 4: Create BLB
         if not run_command(
-            f'python create_blb.py "{aligned_sents}" "{src_json}" "{src_pdf}" -o "{output_blb}"',
+            f'python create_blb.py "{aligned_sents}" "{src_json}" "{src_pdf}" --tgt-json "{tgt_json}" -o "{output_blb}"',
             "Creating BLB file"):
             return 1
         

@@ -40,6 +40,11 @@ def create_blb(aligned_json_path, src_json_path, tgt_json_path, src_pdf_path, ou
     except:
         src_meta = {}
     
+    with open(tgt_json_path, 'r', encoding='utf-8') as f:
+        tgt_lang = json.load(f).get("meta", {}).get("language")
+    if not tgt_lang:
+        raise SystemExit(f"{tgt_json_path}: в meta нет language, язык цели неизвестен")
+
     print("Extracting cover...")
     cover_info = extract_cover_from_pdf(src_pdf_path, page_num=0, dpi=150)
     cover_base64 = base64.b64encode(cover_info["data"]).decode('utf-8')
@@ -51,7 +56,7 @@ def create_blb(aligned_json_path, src_json_path, tgt_json_path, src_pdf_path, ou
             "title_tgt": src_meta.get("title", "Unknown"),
             "author": src_meta.get("author", "Unknown"),
             "lang_src": src_meta.get("language", "ru"),
-            "lang_tgt": "bg"
+            "lang_tgt": tgt_lang
         },
         "cover": {
             "mime": "image/png",
@@ -75,8 +80,9 @@ if __name__ == "__main__":
     parser.add_argument("aligned_json", help="JSON with aligned sentences")
     parser.add_argument("src_json", help="Source parsed JSON (for metadata)")
     parser.add_argument("src_pdf", help="Source PDF (for cover)")
+    parser.add_argument("--tgt-json", required=True, help="Target parsed JSON (for the target language)")
     parser.add_argument("-o", "--output", default="book.blb", help="Output BLB file")
-    
+
     args = parser.parse_args()
-    
-    create_blb(args.aligned_json, args.src_json, None, args.src_pdf, args.output)
+
+    create_blb(args.aligned_json, args.src_json, args.tgt_json, args.src_pdf, args.output)

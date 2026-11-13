@@ -131,7 +131,7 @@ def main():
     
     # ЭТАП 4: Создание BLB
     if not run_cmd(
-        f'python "{script_dir / "create_blb.py"}" "{aligned_sents}" "{src_json}" "{src_pdf}" -o "{output_blb}"',
+        f'python "{script_dir / "create_blb.py"}" "{aligned_sents}" "{src_json}" "{src_pdf}" --tgt-json "{tgt_json}" -o "{output_blb}"',
         "Creating BLB file",
         folder
     ):
