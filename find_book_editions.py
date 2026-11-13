@@ -5,9 +5,15 @@
 По названию и автору:
 1. Wikidata даёт произведение, его названия на всех языках, автора и год его смерти,
    а также страницы Wikisource.
-2. Ищем издания в Wikisource, Project Gutenberg и Internet Archive.
-3. Оставляем только свободные издания в текстовых форматах (TXT, EPUB, HTML, вики-текст,
+2. Ищем издания в Wikisource, Project Gutenberg, Internet Archive и (для болгарского) на
+   chitanka.info.
+3. Оставляем только свободные издания в текстовых форматах (TXT, EPUB, FB2, HTML, вики-текст,
    OCR-текст) и печатаем, на каких языках сколько найдено. Ничего не скачивается.
+
+Правила поиска (--languages, по умолчанию ru,en,bg,es,fr):
+  - сначала ищется русский язык; если издания на нём нет, остальные языки не ищутся
+    (код возврата 2);
+  - затем по важности английский, болгарский, испанский, французский; другие языки не нужны.
 
 Что считается свободным:
   - Wikisource и Project Gutenberg: размещают только общественное достояние;
@@ -22,6 +28,7 @@
 import sys
 import re
 import json
+import html
 import time
 import argparse
 import unicodedata
@@ -357,6 +364,59 @@ def from_internet_archive(work, max_labels=12, per_label=10):
     return [e for e in pmap(edition, ids[:60]) if e]
 
 
+def from_chitanka(work):
+    """chitanka.info — свободная болгарская библиотека (ссылки на EPUB, FB2, TXT)."""
+    bg = work["labels"].get("bg")
+    if not bg:
+        return []
+    page = re.sub(r"\s+", " ", http_get("https://chitanka.info/search?q=" + urllib.parse.quote(bg))
+                  .decode("utf-8", "replace"))
+    all_labels = list(work["labels"].values())
+
+    def clean(x):
+        return html.unescape(re.sub(r"<[^>]+>", "", x)).strip()
+
+    found = {}
+    for marker in ('<article class="media book-media"', '<dl class="text-entity"'):   # сначала книги, потом тексты
+        for chunk in page.split(marker)[1:]:
+            chunk = chunk[:6000]
+            t = re.search(r'<i(?: itemprop="name")?>([^<]+)</i>', chunk)
+            a = re.search(r'itemprop="author".*?itemprop="name"[^>]*>(.*?)</a>', chunk)
+            p = re.search(r'href="(/(?:book|text)/\d+-[\w-]+)"', chunk)
+            links = re.findall(r'href="(/(?:book|text)/\d+-[\w-]+\.(?:epub|fb2\.zip|txt\.zip))"', chunk)
+            if not (t and a and p and links):
+                continue
+            title, author = clean(t.group(1)), clean(a.group(1))
+            if not (title_matches(title, all_labels) and author_matches([author], work["author_labels"])):
+                continue
+            by_ext = {l.split(".", 1)[1].upper().replace("FB2.ZIP", "FB2").replace("TXT.ZIP", "TXT"): l for l in links}
+            best = by_ext.get("EPUB") or by_ext.get("FB2") or next(iter(by_ext.values()))
+            found.setdefault(norm(title), {
+                "source": "chitanka", "lang": "bg", "title": title,
+                "url": "https://chitanka.info" + best, "format": "/".join(by_ext),
+                "free": "Читанка: свободная библиотека", "page": "https://chitanka.info" + p.group(1)})
+    return list(found.values())
+
+
+def restricted(work, wanted, keep_label_lang):
+    """Копия произведения только с названиями и страницами Wikisource нужных языков."""
+    w = dict(work)
+    w["labels"] = {k: v for k, v in work["labels"].items() if lang_code(k) in wanted or k == keep_label_lang}
+    w["sitelinks"] = {k: v for k, v in work["sitelinks"].items()
+                      if k.endswith("wikisource") and lang_code(k[:-len("wikisource")].replace("_", "-")) in wanted}
+    return w
+
+
+def dedupe(editions):
+    seen, out = set(), []
+    for e in editions:
+        key = (e["source"], e["url"])
+        if key not in seen:
+            seen.add(key)
+            out.append(e)
+    return out
+
+
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
@@ -365,7 +425,11 @@ def main():
     ap.add_argument("--title-lang", default="ru", help="язык введённого названия (по умолчанию ru)")
     ap.add_argument("--json", default="", help="сохранить отчёт в JSON")
     ap.add_argument("--no-ia", action="store_true", help="не искать в Internet Archive (быстрее)")
+    ap.add_argument("--languages", default="ru,en,bg,es,fr",
+                    help="языки по важности; первый обязателен: если на нём издания нет, остальные не ищутся")
     args = ap.parse_args()
+    priority = [l.strip().lower() for l in args.languages.split(",") if l.strip()]
+    must, others = priority[0], priority[1:]
 
     print(f"[1/3] Wikidata: {args.title!r} / {args.author!r}")
     work = resolve_work(args.title, args.title_lang, args.author)
@@ -376,39 +440,49 @@ def main():
         print(f"  ВНИМАНИЕ: автор умер в {dy} году (или год неизвестен) — оригинал может быть защищён "
               f"авторским правом, находки нужно проверять вручную.")
 
-    print("[2/3] Поиск изданий")
-    found = []
-    for name, fn in (("Wikisource", from_wikisource), ("Project Gutenberg", from_gutenberg),
-                     ("Internet Archive", from_internet_archive)):
-        if name == "Internet Archive" and args.no_ia:
-            continue
-        before = FAILED[0]
-        got = fn(work)
-        failed = FAILED[0] - before
-        print(f"  {name}: {len(got)}" + (f"  (не удалось запросов: {failed}; например: {FAILED[-1]})" if failed else ""))
-        found += got
+    def search(wanted):
+        w = restricted(work, wanted, args.title_lang)
+        sources = [("Wikisource", from_wikisource), ("Project Gutenberg", from_gutenberg)]
+        if not args.no_ia:
+            sources.append(("Internet Archive", from_internet_archive))
+        if "bg" in wanted:
+            sources.append(("Читанка", from_chitanka))
+        found = []
+        for name, fn in sources:
+            before = FAILED[0]
+            got = [e for e in fn(w) if e["lang"] in wanted]
+            failed = FAILED[0] - before
+            print(f"  {name}: {len(got)}"
+                  + (f"  (не удалось запросов: {failed}; например: {FAILED[-1]})" if failed else ""))
+            found += got
+        return dedupe(found)
 
-    seen, editions = set(), []
-    for e in found:
-        key = (e["source"], e["url"])
-        if key not in seen:
-            seen.add(key)
-            editions.append(e)
+    print(f"[2/3] Язык «{must}» (обязателен)")
+    editions = search({must})
+    if not editions:
+        print(f"\nИздания на языке «{must}» в свободном доступе в текстовых форматах не найдено, "
+              f"остальные языки не ищем.")
+        if FAILED[0]:
+            print(f"  ВНИМАНИЕ: не удалось запросов: {FAILED[0]}, результат может быть неполным")
+        return 2
+    print(f"[3/3] Остальные языки: {', '.join(others)}")
+    editions += search(set(others))
 
     by_lang = defaultdict(list)
     for e in editions:
         by_lang[e["lang"]].append(e)
 
-    print(f"[3/3] Итого: {len(editions)} изданий на {len(by_lang)} языках (свободный доступ, текстовые форматы)")
-    print("  по языкам: " + ", ".join(f"{l} {len(v)}" for l, v in
-                                     sorted(by_lang.items(), key=lambda kv: (-len(kv[1]), kv[0]))))
+    print(f"\nИтого: {len(editions)} изданий (свободный доступ, текстовые форматы)")
+    print("  по языкам: " + ", ".join(f"{l} {len(by_lang[l])}" for l in priority))
     if FAILED[0]:
         print(f"  ВНИМАНИЕ: не удалось запросов: {FAILED[0]}, результат может быть неполным")
-    for lang, items in sorted(by_lang.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+    for lang in priority:
+        items = by_lang[lang]
         srcs = defaultdict(int)
         for e in items:
             srcs[e["source"]] += 1
-        print(f"\n  {lang}: {len(items)}  (" + ", ".join(f"{k} {v}" for k, v in sorted(srcs.items())) + ")")
+        print(f"\n  {lang}: {len(items)}" + ("  (" + ", ".join(f"{k} {v}" for k, v in sorted(srcs.items())) + ")"
+                                            if items else ""))
         for e in items:
             print(f"     [{e['format']}] {e['title'][:60]} — {e.get('page', e['url'])}")
     if args.json:
@@ -419,4 +493,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
