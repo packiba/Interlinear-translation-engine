@@ -177,14 +177,30 @@ def main():
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--drop", action="append", default=[], metavar="LANG:N,N",
                     help="выбросить из книги служебные главы (chapter_no), например en:1,30,31")
+    ap.add_argument("--keep", action="append", default=[], metavar="LANG:A-B,N",
+                    help="оставить в книге только эти главы (chapter_no), например bg:98-125 для сборника")
     args = ap.parse_args()
     if len(args.books) < 2:
         raise SystemExit("нужно минимум две книги")
 
-    drop = {}
+    def parse_numbers(spec):
+        nums = set()
+        for part in spec.split(","):
+            part = part.strip()
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                nums.update(range(int(lo), int(hi) + 1))
+            elif part:
+                nums.add(int(part))
+        return nums
+
+    drop, keep = {}, {}
     for item in args.drop:
         lang, _, nums = item.partition(":")
-        drop.setdefault(lang, set()).update(int(n) for n in nums.split(",") if n.strip())
+        drop.setdefault(lang, set()).update(parse_numbers(nums))
+    for item in args.keep:
+        lang, _, nums = item.partition(":")
+        keep.setdefault(lang, set()).update(parse_numbers(nums))
 
     out = Path(args.output)
     root = Path(args.work_root) if args.work_root else out.parent
@@ -195,8 +211,10 @@ def main():
         lang = book.get("meta", {}).get("language")
         if not lang:
             raise SystemExit(f"{p}: в meta нет language")
-        if lang in drop:
-            book["chapters"] = [c for c in book["chapters"] if c["chapter_no"] not in drop[lang]]
+        if lang in drop or lang in keep:
+            book["chapters"] = [c for c in book["chapters"]
+                                if c["chapter_no"] not in drop.get(lang, ())
+                                and (lang not in keep or c["chapter_no"] in keep[lang])]
             p = root / f"clean_{lang}.json"
             p.write_text(json.dumps(book, ensure_ascii=False), encoding="utf-8")
         paths[lang], books[lang] = Path(p), book

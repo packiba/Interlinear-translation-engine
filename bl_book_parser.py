@@ -575,6 +575,22 @@ def _match_title_rows(rows, title, max_rows=6):
     return None
 
 
+_TITLE_NUM_PREFIX = re.compile(r"^([IVXLC]{1,7}|\d{1,3})[.)]?\s+(\S.*)$")
+_PROSE_LEAD = re.compile(r"^[–—―«„“\"'(]")
+
+
+def is_prose_title(title):
+    """Закладка TOC, в которой лежит начало текста главы, а не заголовок: в некоторых
+    изданиях оглавление строится из первых строк глав (реплика, предложение)."""
+    if heading_class(title) in ("chapter", "part", "volume", "special"):
+        return False        # «Глава I. Тук се разказва…» — длинный, но настоящий заголовок
+    body = _TITLE_NUM_PREFIX.sub(r"\2", title.strip())
+    words = len(body.split())
+    if _PROSE_LEAD.match(body) or len(body) > 90:
+        return True
+    return (words >= 5 and body[-1:] in ".!…") or (words >= 3 and body[-1:] == ":")
+
+
 def toc_entries(doc, pages, flat, index, L, meta_title):
     toc = doc.get_toc(simple=False)
     if not toc:
@@ -652,6 +668,19 @@ def toc_entries(doc, pages, flat, index, L, meta_title):
             trows = rows[s:s + cnt]
             if len(norm("".join(r.text for r in trows))) > 1.6 * len(norm(title)) + 12:
                 trows = []  # «заголовок» TOC — это начало абзаца: текст не трогаем
+            elif trows and is_prose_title(title) and not "".join(r.text for r in trows).isupper():
+                # Текст остаётся в главе; заголовком считаем только номер, если он есть.
+                nm = _TITLE_NUM_PREFIX.match(title.strip())
+                keep = []
+                if nm:
+                    if norm(trows[0].text) == norm(nm.group(1)):
+                        keep = trows[:1]
+                    else:
+                        fm = _TITLE_NUM_PREFIX.match(trows[0].text.strip())
+                        if fm and norm(fm.group(1)) == norm(nm.group(1)):
+                            trows[0].text = fm.group(2)   # номер в одной строке с текстом
+                title = nm.group(1).rstrip(".)") if nm else ""
+                trows = keep
         else:
             body = [r for r in rows if r.kind == "body" and (y is None or r.y1 > y + 1)]
             if body:
