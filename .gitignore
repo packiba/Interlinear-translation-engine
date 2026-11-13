@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Large files and data
+*.json
+*.blb
+*.pdf
+books/
+MP/
+MP_PAIRS/
+PIY/
+ZJ/
+DKG/
+
+# Temporary files
+*.tmp
+*.cache
+*.log
+test_*.py
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Results
+_analysis/
+*.unaligned.json
+*_review_needed.json
