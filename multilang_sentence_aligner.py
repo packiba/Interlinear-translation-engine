@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 """
-Многоязычное выравнивание предложений для варианта 2.
-Использует текущий алгоритм bl_sentence_aligner для получения попарных выравниваний,
-затем объединяет их в единую структуру.
+Многоязычное выравнивание: русский текст — якорь.
+
+1. Для каждого языка запускается bl_sentence_aligner (src=RU, tgt=язык) со своей
+   рабочей папкой; он сам сопоставляет главы и выравнивает предложения.
+2. Каждая пара находится в русском тексте книги (глобальные позиции символов).
+3. Строкой общей таблицы становится отрезок русского текста между «разрезами»,
+   которые не пересекает ни одна пара ни одного языка. Так во всех колонках
+   строка — это один и тот же фрагмент книги.
+
+Использование:
+  python multilang_sentence_aligner.py ru.json en.json fr.json es.json -o out.json
+Первый файл — якорный язык; код языка берётся из meta.language файла.
 """
 
 import sys
+import re
 import json
+import argparse
 import subprocess
-import tempfile
 from pathlib import Path
-from typing import Dict, List, Tuple
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -19,164 +28,174 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-
-def create_bilingual_json(multilang: Dict, lang1: str, lang2: str) -> Tuple[str, str]:
-    """Создать временные JSON для двух языков в формате для bl_sentence_aligner."""
-    lang1_data = {
-        "meta": multilang.get("meta", {}),
-        "chapters": []
-    }
-    lang2_data = {
-        "meta": multilang.get("meta", {}),
-        "chapters": []
-    }
-
-    for ch in multilang["chapters"]:
-        if lang1 in ch["languages"] and lang2 in ch["languages"]:
-            lang1_data["chapters"].append(ch["languages"][lang1])
-            lang2_data["chapters"].append(ch["languages"][lang2])
-
-    f1 = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8')
-    f2 = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8')
-
-    json.dump(lang1_data, f1, ensure_ascii=False)
-    json.dump(lang2_data, f2, ensure_ascii=False)
-
-    f1.close()
-    f2.close()
-
-    return f1.name, f2.name
+HERE = Path(__file__).resolve().parent
 
 
-def run_pairwise_alignment(lang1_file: str, lang2_file: str, lang1: str, lang2: str) -> Dict:
-    """Запустить bl_sentence_aligner для пары языков."""
-    output_file = f"temp_alignment_{lang1}_{lang2}.json"
-
-    cmd = [
-        sys.executable, "bl_sentence_aligner.py",
-        lang1_file, lang2_file,
-        "-o", output_file
-    ]
-
-    print(f"  Выравнивание {lang1.upper()}-{lang2.upper()}...")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        print(f"    ⚠ Ошибка при выравнивании: {result.stderr}")
-        return {"chapters": []}
-
-    with open(output_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    Path(output_file).unlink()
-    return data
+def squash(s):
+    return re.sub(r"\s+", "", s)
 
 
-def merge_pairwise_alignments(multilang: Dict, alignments: Dict[str, Dict]) -> Dict:
-    """
-    Объединить попарные выравнивания в единую многоязычную структуру.
-    
-    Структура выравнивания по главам:
-    - Для каждой главы есть пары RU-EN, RU-FR, RU-ES
-    - Объединяем их в одну главу со всеми предложениями всех языков
-    """
-    result = {
-        "version": "2-multilingual-aligned",
-        "languages": ["ru", "en", "fr", "es"],
-        "n_chapters": len(multilang["chapters"]),
-        "chapters": []
-    }
+def load_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
-    for ch_idx in range(len(multilang["chapters"])):
-        ch_merged = {
-            "chapter_no": ch_idx + 1,
-            "title": multilang["chapters"][ch_idx]["languages"]["ru"].get("title", ""),
-            "multilingual_pairs": []
-        }
 
-        # Получить пары RU-EN, RU-FR, RU-ES для этой главы
-        ru_en_pairs = []
-        ru_fr_pairs = []
-        ru_es_pairs = []
+def run_pair_aligner(ru_path, tgt_path, work_dir, out_path, force):
+    work_dir.mkdir(parents=True, exist_ok=True)
+    if out_path.exists() and not force:
+        print(f"  [кэш] {out_path.name}")
+        return
+    cmd = [sys.executable, str(HERE / "bl_sentence_aligner.py"),
+           str(ru_path), str(tgt_path), "-o", str(out_path), "--work-dir", str(work_dir)]
+    if force:
+        cmd.append("--force")
+    print("  " + " ".join(cmd[2:]))
+    res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    if res.returncode != 0:
+        raise RuntimeError(f"aligner failed for {tgt_path}:\n{res.stdout[-1500:]}\n{res.stderr[-1500:]}")
 
-        if "ru-en" in alignments and ch_idx < len(alignments["ru-en"].get("chapters", [])):
-            ru_en_pairs = alignments["ru-en"]["chapters"][ch_idx].get("pairs", [])
-        if "ru-fr" in alignments and ch_idx < len(alignments["ru-fr"].get("chapters", [])):
-            ru_fr_pairs = alignments["ru-fr"]["chapters"][ch_idx].get("pairs", [])
-        if "ru-es" in alignments and ch_idx < len(alignments["ru-es"].get("chapters", [])):
-            ru_es_pairs = alignments["ru-es"]["chapters"][ch_idx].get("pairs", [])
 
-        # Объединить всё в одну структуру
-        # Каждая строка: (RU, EN, FR, ES)
-        max_pairs = max(len(ru_en_pairs), len(ru_fr_pairs), len(ru_es_pairs))
+def ru_coordinates(ru_book):
+    """-> ({chapter_no: (start, end)}, весь русский текст без пробелов)."""
+    spans, text, pos = {}, [], 0
+    for ch in ru_book["chapters"]:
+        t = squash("".join(str(p) for p in ch.get("paragraphs", [])))
+        spans[ch["chapter_no"]] = (pos, pos + len(t))
+        text.append(t)
+        pos += len(t)
+    return spans, "".join(text)
 
-        for i in range(max_pairs):
-            multilang_pair = {
-                "ru": "",
-                "en": "",
-                "fr": "",
-                "es": ""
-            }
 
-            if i < len(ru_en_pairs):
-                multilang_pair["ru"] = ru_en_pairs[i].get("src", "")
-                multilang_pair["en"] = ru_en_pairs[i].get("tgt", "")
+def locate_segments(work_dir, spans, ru_text):
+    """Читает отчёты глав -> сегменты (start, end, ru_text, tgt_text) и описание единиц."""
+    segs, units = [], []
+    for f in sorted(work_dir.glob("chapter_*.json")):
+        rec = json.loads(f.read_text(encoding="utf-8"))
+        src_chs = rec["source_chapters"]
+        lo = min(spans[c][0] for c in src_chs)
+        hi = max(spans[c][1] for c in src_chs)
+        cursor = lo
+        units.append({"source_chapters": src_chs, "title_tgt": rec.get("title_tgt", "")})
+        for p in rec["pairs"]:
+            key = squash(p["src"])
+            if not key:
+                continue
+            at = ru_text.find(key, cursor, hi)
+            if at < 0:
+                raise RuntimeError(f"{f.name}: русская пара не найдена в тексте: {p['src'][:60]!r}")
+            segs.append((at, at + len(key), p["src"], p["tgt"]))
+            cursor = at + len(key)
+    segs.sort(key=lambda s: (s[0], s[1]))
+    return segs, units
 
-            if i < len(ru_fr_pairs):
-                # ru уже задан, не перезаписываем
-                multilang_pair["fr"] = ru_fr_pairs[i].get("tgt", "")
 
-            if i < len(ru_es_pairs):
-                # ru уже задан, не перезаписываем
-                multilang_pair["es"] = ru_es_pairs[i].get("tgt", "")
+def merge(spans, per_lang):
+    """per_lang: {lang: [(start, end, ru_text, tgt_text)]} -> строки с общими границами."""
+    points = set()
+    for a, b in spans.values():
+        points.update((a, b))
+    for segs in per_lang.values():
+        for s, e, *_ in segs:
+            points.update((s, e))
+    points = sorted(points)
 
-            ch_merged["multilingual_pairs"].append(multilang_pair)
+    # Разрез недопустим, если его пересекает пара любого языка.
+    banned = set()
+    for segs in per_lang.values():
+        for s, e, *_ in segs:
+            banned.update(p for p in points if s < p < e)
+    cuts = [p for p in points if p not in banned]
 
-        result["chapters"].append(ch_merged)
-
-    return result
+    rows = []
+    for a, b in zip(cuts, cuts[1:]):
+        row, ru_parts = {}, []
+        for lang, segs in per_lang.items():
+            inside = [sg for sg in segs if sg[0] >= a and sg[1] <= b]
+            if inside:
+                row[lang] = " ".join(sg[3] for sg in inside).strip()
+                if not ru_parts:
+                    ru_parts = [sg[2] for sg in inside]
+        if ru_parts:
+            rows.append((a, " ".join(ru_parts).strip(), row))
+    return rows
 
 
 def main():
-    import argparse
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    ap.add_argument("books", nargs="+", help="JSON книг; первый — русский (якорь)")
+    ap.add_argument("-o", "--output", default="multilang_aligned_sentences.json")
+    ap.add_argument("--work-root", default="", help="папка для промежуточных файлов (по умолчанию рядом с -o)")
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--drop", action="append", default=[], metavar="LANG:N,N",
+                    help="выбросить из книги служебные главы (chapter_no), например en:1,30,31")
+    args = ap.parse_args()
 
-    parser = argparse.ArgumentParser(description="Многоязычное выравнивание предложений")
-    parser.add_argument("multilang_aligned", help="Выровненная многоязычная структура глав")
-    parser.add_argument("-o", "--output", default="multilang_aligned_sentences.json",
-                        help="Output JSON")
+    drop = {}
+    for item in args.drop:
+        lang, _, nums = item.partition(":")
+        drop.setdefault(lang, set()).update(int(n) for n in nums.split(",") if n.strip())
 
-    args = parser.parse_args()
+    out = Path(args.output)
+    root = Path(args.work_root) if args.work_root else out.parent
 
-    print(f"[*] Загрузка {args.multilang_aligned}...")
-    with open(args.multilang_aligned, 'r', encoding='utf-8') as f:
-        multilang = json.load(f)
+    def prepare(path):
+        """Возвращает (язык, путь к книге без выброшенных глав)."""
+        book = load_json(path)
+        lang = book.get("meta", {}).get("language")
+        if not lang:
+            raise SystemExit(f"{path}: в meta нет language")
+        if lang in drop:
+            book["chapters"] = [c for c in book["chapters"] if c["chapter_no"] not in drop[lang]]
+            path = root / f"clean_{lang}.json"
+            path.write_text(json.dumps(book, ensure_ascii=False), encoding="utf-8")
+        return lang, Path(path), book
 
-    print(f"[*] Выравнивание предложений для {multilang['n_chapters']} глав...")
-    print()
+    ru_lang, ru_path, ru_book = prepare(args.books[0])
+    others = [prepare(p)[:2] for p in args.books[1:]]
+    print(f"[1/3] Выравнивание пар {ru_lang}-X")
+    for lang, path in others:
+        run_pair_aligner(ru_path, path, root / f"work_{lang}", root / f"pair_{ru_lang}_{lang}.json", args.force)
 
-    alignments = {}
+    print("[2/3] Привязка пар к русскому тексту")
+    spans, ru_text = ru_coordinates(ru_book)
+    per_lang, unit_info = {}, {}
+    for lang, _ in others:
+        segs, units = locate_segments(root / f"work_{lang}", spans, ru_text)
+        per_lang[lang], unit_info[lang] = segs, units
+        covered = sum(e - s for s, e, *_ in segs)
+        print(f"  {lang}: {len(segs)} пар, покрыто {covered / max(1, len(ru_text)) * 100:.1f}% русского текста")
 
-    # Создать попарные выравнивания RU-EN, RU-FR, RU-ES
-    for lang in ["en", "fr", "es"]:
-        lang1_file, lang2_file = create_bilingual_json(multilang, "ru", lang)
+    print("[3/3] Слияние")
+    rows = merge(spans, per_lang)
+    langs = [ru_lang] + [l for l, _ in others]
 
-        alignment = run_pairwise_alignment(lang1_file, lang2_file, "ru", lang)
-        alignments[f"ru-{lang}"] = alignment
+    chapters = []
+    for ch in ru_book["chapters"]:
+        a, b = spans[ch["chapter_no"]]
+        mine = [(ru, row) for start, ru, row in rows if a <= start < b]
+        if not mine:
+            continue
+        titles = {ru_lang: str(ch.get("title", "")).strip()}
+        for lang, units in unit_info.items():
+            for u in units:
+                # Заголовок другого языка берём, только если он похож на заголовок:
+                # парсер иногда принимает за него начало абзаца.
+                if (u["source_chapters"] == [ch["chapter_no"]]
+                        and 0 < len(u["title_tgt"]) <= 30 and " · " not in u["title_tgt"]):
+                    titles[lang] = u["title_tgt"]
+        pairs = [{ru_lang: ru, **row} for ru, row in mine]
+        chapters.append({"chapter_no": len(chapters) + 1, "title": titles[ru_lang],
+                         "titles": titles, "multilingual_pairs": pairs})
 
-        Path(lang1_file).unlink()
-        Path(lang2_file).unlink()
-
-    print()
-    print("[*] Объединение попарных выравниваний...")
-    multilang_result = merge_pairwise_alignments(multilang, alignments)
-
-    print(f"[*] Сохранение результата...")
-    with open(args.output, 'w', encoding='utf-8') as f:
-        json.dump(multilang_result, f, ensure_ascii=False, indent=2)
-
-    print(f"[OK] Многоязычное выравнивание: {args.output}")
-    print(f"    Версия: {multilang_result['version']}")
-    print(f"    Глав: {multilang_result['n_chapters']}")
+    total = sum(len(c["multilingual_pairs"]) for c in chapters)
+    complete = sum(1 for c in chapters for p in c["multilingual_pairs"] if len(p) == len(langs))
+    print(f"  глав {len(chapters)}, строк {total}, из них со всеми {len(langs)} языками: {complete}")
+    out.write_text(json.dumps({
+        "version": "2-multilingual-aligned",
+        "languages": langs,
+        "n_chapters": len(chapters),
+        "chapters": chapters,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[OK] {out}")
 
 
 if __name__ == "__main__":

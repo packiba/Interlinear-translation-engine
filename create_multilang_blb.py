@@ -32,9 +32,16 @@ def extract_cover_from_pdf(pdf_path, page_num=0, dpi=150):
     }
 
 
-def create_multilang_blb(multilang_json, ru_pdf_path, output_path):
+LANG_NAMES = {
+    "ru": "Русский", "en": "English", "fr": "Français", "es": "Español",
+    "de": "Deutsch", "it": "Italiano", "bg": "Български",
+}
+
+
+def create_multilang_blb(multilang_json, ru_pdf_path, output_path, title, author):
     with open(multilang_json, 'r', encoding='utf-8') as f:
         multilang_data = json.load(f)
+    languages = multilang_data["languages"]
 
     print("[*] Извлечение обложки...")
     cover_info = extract_cover_from_pdf(ru_pdf_path, page_num=0, dpi=150)
@@ -45,15 +52,10 @@ def create_multilang_blb(multilang_json, ru_pdf_path, output_path):
         "blb_version": 2,
         "format": "multilingual",
         "book": {
-            "title": "Маленький принц",
-            "author": "Антуан де Сент Экзюпери",
-            "languages": ["ru", "en", "fr", "es"],
-            "lang_names": {
-                "ru": "Русский",
-                "en": "English",
-                "fr": "Français",
-                "es": "Español"
-            }
+            "title": title,
+            "author": author,
+            "languages": languages,
+            "lang_names": {l: LANG_NAMES.get(l, l) for l in languages}
         },
         "cover": {
             "mime": "image/png",
@@ -65,7 +67,7 @@ def create_multilang_blb(multilang_json, ru_pdf_path, output_path):
     }
 
     with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(blb, f, ensure_ascii=False, indent=2)
+        json.dump(blb, f, ensure_ascii=False)
 
     print(f"[OK] Многоязычный BLB: {output_path}")
     print(f"    Версия BLB: {blb['blb_version']}")
@@ -82,7 +84,9 @@ if __name__ == "__main__":
     parser.add_argument("multilang_json", help="Многоязычное выравнивание JSON")
     parser.add_argument("ru_pdf", help="PDF источника (для обложки)")
     parser.add_argument("-o", "--output", default="multilang.blb", help="Output BLB file")
+    parser.add_argument("--title", required=True, help="Название книги")
+    parser.add_argument("--author", default="", help="Автор")
 
     args = parser.parse_args()
 
-    create_multilang_blb(args.multilang_json, args.ru_pdf, args.output)
+    create_multilang_blb(args.multilang_json, args.ru_pdf, args.output, args.title, args.author)
